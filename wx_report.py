@@ -2,7 +2,6 @@
 import os
 import requests
 import json
-from bs4 import BeautifulSoup
 
 # 从测试号信息获取
 appID = os.environ.get("APP_ID")
