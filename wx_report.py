@@ -2,6 +2,7 @@
 import os
 import requests
 import json
+from datetime import datetime
 
 # 从测试号信息获取
 appID = os.environ.get("APP_ID")
@@ -31,7 +32,13 @@ def get_daily_love():
     return daily_love
 
 def get_data():
-    return ["ssr-url", 300]
+    date_str = '2026-03-12'
+    # 将字符串转换为datetime对象
+    given_date = datetime.strptime(date_str, '%Y-%m-%d')
+    today = datetime.now()
+    # 计算两个日期之间的差值
+    delta = given_date - today
+    return ["", delta.days]
 
 def send_data(access_token, data):
     # touser 就是 openID
