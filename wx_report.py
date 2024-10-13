@@ -49,7 +49,7 @@ def send_data(access_token, data):
     import datetime
     today = datetime.date.today()
     today_str = today.strftime("%Y年%m月%d日")
-    note = "模仿code master, 模仿trade master. \n" + get_daily_love()
+    note = get_daily_love()
     print(note)
 
     body = {
@@ -58,7 +58,7 @@ def send_data(access_token, data):
         "url": "https://weixin.qq.com",
         "data": {
             "ssr": {
-                "value": data[0]
+                "value": "模仿code master, 模仿trade master."
             },
             "vip": {
                 "value": data[1]
