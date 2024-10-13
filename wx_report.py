@@ -49,6 +49,7 @@ def send_data(access_token, data):
     import datetime
     today = datetime.date.today()
     today_str = today.strftime("%Y年%m月%d日")
+    note = "模仿code master, 模仿trade master. \n" + get_daily_love()
 
     body = {
         "touser": openId.strip(),
@@ -62,7 +63,7 @@ def send_data(access_token, data):
                 "value": data[1]
             },
             "today_note": {
-                "value": "模仿code master, 模仿trade master. \n" + get_daily_love()
+                "value": note
             }
         }
     }
