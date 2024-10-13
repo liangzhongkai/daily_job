@@ -55,9 +55,6 @@ def send_data(access_token, data):
         "template_id": template_id.strip(),
         "url": "https://weixin.qq.com",
         "data": {
-            "date": {
-                "value": today_str
-            },
             "ssr": {
                 "value": data[0]
             },
@@ -65,7 +62,7 @@ def send_data(access_token, data):
                 "value": data[1]
             },
             "today_note": {
-                "value": get_daily_love()
+                "value": "模仿code master, 模仿trade master. \n" + get_daily_love()
             }
         }
     }
