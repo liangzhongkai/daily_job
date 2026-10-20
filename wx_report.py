@@ -141,68 +141,20 @@ def parse_table_page(driver):
     return []
 
 
-def read_page_no(driver):
-    """读取页码指示器 'cur / total' 中的 cur，找不到返回 None"""
-    for el in driver.find_elements(By.XPATH, "//*[contains(text(),'/')]"):
-        m = re.match(r'^(\d+)\s*/\s*\d+$', el.text.strip())
-        if m:
-            return int(m.group(1))
-    return None
-
-
 def first_data_coin(driver):
     """读取表格第一条数据行的币名（tr[td][2]，tr[td][1] 是表头）"""
     els = driver.find_elements(By.XPATH, "//table//tr[td][2]/td[1]")
     return els[0].text.strip() if els else None
 
 
-def goto_next_page(driver):
-    """点击"下一页"；通过页码指示器递增或首行币名变化确认翻页成功。
-    已是最后一页或找不到翻页控件时返回 False。"""
-    cur = read_page_no(driver)
-    before_coin = first_data_coin(driver)
-    # 优先用页码判断是否还有下一页
-    if cur is not None:
-        total = None
-        for el in driver.find_elements(By.XPATH, "//*[contains(text(),'/')]"):
-            m = re.match(r'^\d+\s*/\s*(\d+)$', el.text.strip())
-            if m:
-                total = int(m.group(1))
-                break
-        if total is not None and cur >= total:
-            print(f"DEBUG: 已到最后一页 {cur}/{total}")
-            return False
-
-    # 找"下一页"控件：优先 class/aria-label 含 next，否则取可见含 svg 的小控件中
-    # DOM 靠后的（分页器里 prev 在前、next 在后）
-    picks = []
-    for el in driver.find_elements(
-            By.XPATH, "//button | //li | //div[@role='button'] | //span[@role='button']"):
-        if not el.is_displayed():
-            continue
-        cls = (el.get_attribute("class") or "").lower()
-        aria = (el.get_attribute("aria-label") or "").lower()
-        if el.get_attribute("aria-disabled") == "true" or "disabled" in cls:
-            continue
-        if "next" in cls or "next" in aria:
-            picks.insert(0, el)  # 含 next 的排最前
-        elif el.find_elements(By.TAG_NAME, "svg") and el.size.get("width", 999) <= 60:
-            picks.append(el)
-    if not picks:
-        print("DEBUG: 未找到下一页控件，停止翻页")
+def click_column_header(driver, name):
+    """点击列头触发排序（再次点击切换升/降序）"""
+    tds = driver.find_elements(By.XPATH, f"//td[normalize-space()='{name}']")
+    if not tds:
+        print(f"DEBUG: 未找到列头 {name}")
         return False
-    driver.execute_script("arguments[0].click();", picks[0])
-
-    # 确认翻页：首行币名变化 或 页码+1（最多等6秒）
-    for _ in range(12):
-        time.sleep(0.5)
-        now = first_data_coin(driver)
-        if before_coin and now and now != before_coin:
-            return True
-        now_cur = read_page_no(driver)
-        if cur is not None and now_cur is not None and now_cur > cur:
-            return True
-    return False
+    driver.execute_script("arguments[0].click();", tds[0])
+    return True
 
 
 def _parse_row_major(driver):
@@ -367,26 +319,30 @@ def fetch_funding_rows():
         except Exception as e:
             print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
 
-        # 分页解析全部数据（表格分页，每页约25条）
-        page_rows = parse_table_page(driver)
-        if not page_rows:
-            rows = parse_rows_generic(driver)  # 兜底：非 table 结构的解析方式
-        else:
-            rows = list(page_rows)
-            seen = {r[0] for r in rows}
-            page_no = 1
-            while page_no < 300:  # 安全上限，防死循环
-                if not goto_next_page(driver):
+        # 用点击列头排序代替翻页：每列点两次得到升序+降序，各取第一页。
+        # 绝对值达标的行必然连续位于该列排序结果的最前部（正值在最前或负值在最前），
+        # 因此 4 个快照（2列 x 升/降序）即可覆盖全部达标行，无需遍历176页。
+        snapshots = {}  # coin -> (hl, arb)，按币名去重
+        for col in TARGET_COLUMNS:
+            for click_no in (1, 2):
+                before = first_data_coin(driver)
+                if not click_column_header(driver, col):
                     break
+                # 等表格按新排序刷新（首行变化，最多5秒）
+                for _ in range(10):
+                    time.sleep(0.5)
+                    if first_data_coin(driver) != before:
+                        break
+                time.sleep(0.5)
                 page_rows = parse_table_page(driver)
-                new = [r for r in page_rows if r[0] not in seen]
-                if not page_rows or not new:
-                    print("DEBUG: 翻页后无新数据，停止")
-                    break
-                seen.update(r[0] for r in new)
-                rows.extend(new)
-                page_no += 1
-            print(f"DEBUG: 共解析 {page_no} 页 / {len(rows)} 个币种")
+                print(f"DEBUG: {col} 第{click_no}次排序后解析 {len(page_rows)} 行，"
+                      f"首行: {page_rows[0][0] if page_rows else 'N/A'}")
+                for coin, hl, arb in page_rows:
+                    snapshots[coin] = (hl, arb)
+        rows = [(c, hl, arb) for c, (hl, arb) in snapshots.items()]
+        if not rows:
+            rows = parse_rows_generic(driver)  # 兜底：排序点击失败时至少解析默认页
+        print(f"DEBUG: 排序快照共 {len(rows)} 个币种")
     finally:
         driver.quit()
     return rows
