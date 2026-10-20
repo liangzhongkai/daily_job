@@ -96,6 +96,46 @@ def parse_percent(text):
         return None
 
 
+def parse_rows_generic(driver):
+    """通用行列解析：按文本定位表头单元格 → 其所在行为表头行 →
+    同容器的兄弟行为数据行。不依赖 <table>/<th>/<td> 标签。"""
+    rows = []
+    header_cells = driver.find_elements(
+        By.XPATH, "//*[normalize-space(text())='Binance-HL Arb']")
+    for hc in header_cells:
+        # 向上找一个"行"元素：其直接子元素数 >= 4（一行有多列）
+        row_el = hc
+        header_texts = []
+        for _ in range(5):
+            row_el = row_el.find_element(By.XPATH, "..")
+            children = row_el.find_elements(By.XPATH, "./*")
+            header_texts = [c.text.strip() for c in children]
+            if len(children) >= 4 and "Binance-HL Arb" in header_texts:
+                break
+        if "Binance-HL Arb" not in header_texts:
+            continue
+        col_idx = {}
+        for name in TARGET_COLUMNS:
+            if name in header_texts:
+                col_idx[name] = header_texts.index(name)
+        if len(col_idx) < len(TARGET_COLUMNS):
+            continue
+        # 数据行 = 行元素在父容器中的后续兄弟
+        data_rows = row_el.find_elements(By.XPATH, "./following-sibling::*")
+        for tr in data_rows:
+            cells = [c.text.strip() for c in tr.find_elements(By.XPATH, "./*")]
+            if len(cells) <= max(col_idx.values()):
+                continue
+            coin = cells[0].lstrip("☆★").strip()
+            hl = parse_percent(cells[col_idx["Hyperliquid"]])
+            arb = parse_percent(cells[col_idx["Binance-HL Arb"]])
+            if coin:
+                rows.append((coin, hl, arb))
+        if rows:
+            break
+    return rows
+
+
 def fetch_funding_rows():
     """打开页面，点击 Hourly，返回 [(coin, hyperliquid, binance_hl_arb), ...]"""
     driver = build_driver()
@@ -104,25 +144,34 @@ def fetch_funding_rows():
         driver.get(FUNDING_URL)
         wait = WebDriverWait(driver, 45)
 
-        # Hourly 是右上角的下拉框（select），用 Select 选择；找不到就跳过（可能默认就是 Hourly）
+        # Hourly 是自定义下拉（styled-components div，非原生 select）：
+        # 先点击触发器展开，再点击弹出的选项
         try:
-            sel_el = wait.until(EC.presence_of_element_located(
-                (By.XPATH,
-                 "//select[.//option[contains(translate(text(),'HOURLY','hourly'),'hourly')]]"
-                 " | //select[option[contains(text(),'Hourly')]]")))
-            select = Select(sel_el)
-            for opt in select.options:
-                if "hourly" in opt.text.strip().lower():
-                    select.select_by_visible_text(opt.text.strip())
-                    print(f"已选择下拉项: {opt.text.strip()!r}")
-                    break
+            triggers = [e for e in driver.find_elements(
+                By.XPATH, "//*[normalize-space(text())='Hourly']") if e.is_displayed()]
+            if triggers:
+                trigger = triggers[0]
+                driver.execute_script("arguments[0].click();", trigger)
+                time.sleep(1)
+                # 展开后会出现选项列表；点击除触发器以外的 Hourly 选项
+                for opt in driver.find_elements(
+                        By.XPATH, "//*[normalize-space(text())='Hourly']"):
+                    if opt.is_displayed() and opt != trigger:
+                        driver.execute_script("arguments[0].click();", opt)
+                        print(f"已点击 Hourly 选项: <{opt.tag_name}> {opt.get_attribute('class')!r}")
+                        break
+                else:
+                    print("展开后未找到 Hourly 选项（可能默认已是 Hourly）")
+            else:
+                print("未找到 Hourly 触发器，按页面默认档位继续")
             time.sleep(2)
         except Exception as e:
             print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
 
-        # 等表格出现
+        # 等表头出现（表头不一定是 <th>，直接按文本等）
         try:
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table tbody tr")))
+            wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//*[normalize-space(text())='Binance-HL Arb']")))
         except TimeoutException:
             # 保存页面快照供调试（GitHub Actions 里作为 artifact 下载）
             with open("funding_debug.html", "w", encoding="utf-8") as f:
@@ -130,40 +179,9 @@ def fetch_funding_rows():
             driver.save_screenshot("funding_debug.png")
             print("DEBUG: 页面标题 =", driver.title)
             print("DEBUG: body 前2000字符 =\n", driver.page_source[:2000])
-            raise RuntimeError("60秒内表格未渲染，快照已保存 funding_debug.html/png")
+            raise RuntimeError("45秒内表头未渲染，快照已保存 funding_debug.html/png")
 
-        tables = driver.find_elements(By.CSS_SELECTOR, "table")
-        for table in tables:
-            headers = [th.text.strip() for th in table.find_elements(By.CSS_SELECTOR, "thead th")]
-            if not headers:
-                continue
-            # 找到目标列的下标
-            col_idx = {}
-            for name in TARGET_COLUMNS:
-                for i, h in enumerate(headers):
-                    if h == name:
-                        col_idx[name] = i
-                        break
-            if len(col_idx) < len(TARGET_COLUMNS):
-                continue
-
-            for tr in table.find_elements(By.CSS_SELECTOR, "tbody tr"):
-                cells = [td.text.strip() for td in tr.find_elements(By.CSS_SELECTOR, "td")]
-                if len(cells) <= max(col_idx.values()):
-                    continue
-                coin = cells[0]
-                hl = parse_percent(cells[col_idx["Hyperliquid"]])
-                arb = parse_percent(cells[col_idx["Binance-HL Arb"]])
-                if coin:
-                    rows.append((coin, hl, arb))
-            if rows:
-                break
-        if not rows:
-            with open("funding_debug.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            driver.save_screenshot("funding_debug.png")
-            print("DEBUG: 表头们 =", [[th.text for th in t.find_elements(By.CSS_SELECTOR, 'th')]
-                                    for t in tables])
+        rows = parse_rows_generic(driver)
     finally:
         driver.quit()
     return rows
