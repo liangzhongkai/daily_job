@@ -341,7 +341,7 @@ def funding_alert_job():
             valid = [(coin, v) for coin, *vals in rows if (v := vals[idx - 1]) is not None]
             if valid:
                 coin, v = max(valid, key=lambda x: abs(x[1]))
-                print(f"|{name}| 最大: {coin} = {fmt(v)}")
+                print(f"|{name}| 绝对值最大: {coin} = {fmt(v)} (|{v:.4f}|%)")
             else:
                 print(f"|{name}| 无有效数值")
 
