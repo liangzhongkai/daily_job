@@ -97,6 +97,15 @@ def parse_percent(text):
 
 
 def parse_rows_generic(driver):
+    """先按行式结构解析（一行=多列兄弟元素）；失败则尝试列式结构
+    （每列一个竖直容器，单元格按行号对齐）。"""
+    rows = _parse_row_major(driver)
+    if not rows:
+        rows = _parse_column_major(driver)
+    return rows
+
+
+def _parse_row_major(driver):
     """通用行列解析：按文本定位表头单元格 → 其所在行为表头行 →
     同容器的兄弟行为数据行。不依赖 <table>/<th>/<td> 标签。"""
     rows = []
@@ -107,12 +116,14 @@ def parse_rows_generic(driver):
     for hc in header_cells:
         print(f"DEBUG: 表头单元格 <{hc.tag_name}> class={hc.get_attribute('class')!r} "
               f"text={hc.text!r}")
-        # 打印父级 3 层的 outerHTML，便于对照真实结构
+        # 打印父级 6 层的结构，便于对照真实结构
         anc = hc
-        for lvl in range(3):
+        for lvl in range(6):
             anc = anc.find_element(By.XPATH, "..")
+            children = anc.find_elements(By.XPATH, "./*")
+            child_texts = [c.text.strip()[:30].replace("\n", "|") for c in children[:12]]
             print(f"DEBUG: 祖先[{lvl+1}] <{anc.tag_name}> class={anc.get_attribute('class')!r} "
-                  f"outerHTML(前600)={anc.get_attribute('outerHTML')[:600]!r}")
+                  f"子元素数={len(children)} 子文本={child_texts}")
         # 向上找一个"行"元素：其直接子元素数 >= 4（一行有多列）
         row_el = hc
         header_texts = []
@@ -143,6 +154,60 @@ def parse_rows_generic(driver):
                 rows.append((coin, hl, arb))
         if rows:
             break
+    return rows
+
+
+def _parse_column_major(driver):
+    """列式结构解析：每个表头单元格向上找到"单元格竖直堆栈"容器
+    （直接子元素数 >=10，且多为百分数文本），再找到币名列，按行号对齐。"""
+    import re
+    pct_re = re.compile(r'^[+-]?\d+(\.\d+)?%$')
+
+    def cell_stack(el):
+        """向上找 el 所属的堆栈容器：子元素>=10 且多数为百分数文本"""
+        cur = el
+        for _ in range(8):
+            cur = cur.find_element(By.XPATH, "..")
+            children = cur.find_elements(By.XPATH, "./*")
+            if len(children) >= 10:
+                texts = [c.text.strip() for c in children]
+                pct = sum(1 for t in texts if pct_re.match(t))
+                if pct >= len(texts) * 0.6:
+                    return texts
+        return None
+
+    arb_texts = hl_texts = coin_texts = None
+    # 目标列
+    for name, store in (("Binance-HL Arb", "arb"), ("Hyperliquid", "hl")):
+        cells = driver.find_elements(By.XPATH, f"//*[contains(text(),'{name}')]")
+        for hc in cells:
+            texts = cell_stack(hc)
+            if texts:
+                if store == "arb":
+                    arb_texts = texts
+                else:
+                    hl_texts = texts
+                break
+    # 币名列：文本不是百分数、且数量与目标列一致的竖直堆栈
+    if arb_texts:
+        n = len(arb_texts)
+        cands = driver.find_elements(
+            By.XPATH, "//div[count(*)>5][not(contains(text(),'%'))]")
+        for c in cands:
+            children = c.find_elements(By.XPATH, "./*")
+            if len(children) != n:
+                continue
+            texts = [ch.text.strip().lstrip("☆★").strip() for ch in children]
+            pct = sum(1 for t in texts if pct_re.match(t))
+            if pct == 0 and all(texts):
+                coin_texts = texts
+                break
+    if not (arb_texts and hl_texts and coin_texts):
+        print(f"DEBUG: 列式解析失败 arb={arb_texts is not None} "
+              f"hl={hl_texts is not None} coin={coin_texts is not None}")
+        return []
+    rows = list(zip(coin_texts, hl_texts, arb_texts))
+    print(f"DEBUG: 列式解析成功，{len(rows)} 行")
     return rows
 
 
