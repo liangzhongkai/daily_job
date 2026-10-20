@@ -11,8 +11,9 @@ from datetime import datetime
 import requests
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 # 从测试号信息获取
 appID = os.environ.get("APP_ID")
@@ -101,16 +102,35 @@ def fetch_funding_rows():
     rows = []
     try:
         driver.get(FUNDING_URL)
-        wait = WebDriverWait(driver, 30)
+        wait = WebDriverWait(driver, 45)
 
-        # 点击 Hourly 切换显示
-        hourly_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//*[normalize-space(text())='Hourly']")))
-        hourly_btn.click()
-        time.sleep(2)  # 等表格刷新
+        # Hourly 是右上角的下拉框（select），用 Select 选择；找不到就跳过（可能默认就是 Hourly）
+        try:
+            sel_el = wait.until(EC.presence_of_element_located(
+                (By.XPATH,
+                 "//select[.//option[contains(translate(text(),'HOURLY','hourly'),'hourly')]]"
+                 " | //select[option[contains(text(),'Hourly')]]")))
+            select = Select(sel_el)
+            for opt in select.options:
+                if "hourly" in opt.text.strip().lower():
+                    select.select_by_visible_text(opt.text.strip())
+                    print(f"已选择下拉项: {opt.text.strip()!r}")
+                    break
+            time.sleep(2)
+        except Exception as e:
+            print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
 
         # 等表格出现
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table")))
+        try:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table tbody tr")))
+        except TimeoutException:
+            # 保存页面快照供调试（GitHub Actions 里作为 artifact 下载）
+            with open("funding_debug.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            driver.save_screenshot("funding_debug.png")
+            print("DEBUG: 页面标题 =", driver.title)
+            print("DEBUG: body 前2000字符 =\n", driver.page_source[:2000])
+            raise RuntimeError("60秒内表格未渲染，快照已保存 funding_debug.html/png")
 
         tables = driver.find_elements(By.CSS_SELECTOR, "table")
         for table in tables:
@@ -138,6 +158,12 @@ def fetch_funding_rows():
                     rows.append((coin, hl, arb))
             if rows:
                 break
+        if not rows:
+            with open("funding_debug.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            driver.save_screenshot("funding_debug.png")
+            print("DEBUG: 表头们 =", [[th.text for th in t.find_elements(By.CSS_SELECTOR, 'th')]
+                                    for t in tables])
     finally:
         driver.quit()
     return rows

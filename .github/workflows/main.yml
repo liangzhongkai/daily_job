@@ -28,7 +28,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Run weather Report
+    - name: Run funding rate Report
       run: |
         python wx_report.py
       env:
@@ -36,3 +36,12 @@ jobs:
         APP_SECRET: ${{ secrets.APP_SECRET }}
         OPEN_ID: ${{ secrets.OPEN_ID }}
         TEMPLATE_ID: ${{ secrets.TEMPLATE_ID }}
+    - name: Upload debug snapshot
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: funding-debug
+        path: |
+          funding_debug.html
+          funding_debug.png
+        if-no-files-found: ignore
