@@ -97,12 +97,47 @@ def parse_percent(text):
 
 
 def parse_rows_generic(driver):
-    """先按行式结构解析（一行=多列兄弟元素）；失败则尝试列式结构
-    （每列一个竖直容器，单元格按行号对齐）。"""
-    rows = _parse_row_major(driver)
+    """容错解析：优先按 <table> 遍历所有 <tr>（不依赖 thead/tbody/th 结构），
+    失败则尝试行式 div 结构，最后尝试列式 div 结构。"""
+    rows = _parse_table(driver)
+    if not rows:
+        rows = _parse_row_major(driver)
     if not rows:
         rows = _parse_column_major(driver)
     return rows
+
+
+def _parse_table(driver):
+    """标准 <table> 解析：第一个 <tr> 当表头（无论 th/td），其余 <tr> 当数据行。"""
+    tables = driver.find_elements(
+        By.XPATH, "//table[.//*[contains(text(),'Binance-HL Arb')]]")
+    for table in tables:
+        trs = table.find_elements(By.TAG_NAME, "tr")
+        if len(trs) < 2:
+            continue
+        header_texts = [c.text.strip() for c in trs[0].find_elements(
+            By.XPATH, "./th|./td")]
+        col_idx = {}
+        for name in TARGET_COLUMNS:
+            if name in header_texts:
+                col_idx[name] = header_texts.index(name)
+        if len(col_idx) < len(TARGET_COLUMNS):
+            continue
+        rows = []
+        for tr in trs[1:]:
+            cells = [c.text.strip() for c in tr.find_elements(
+                By.XPATH, "./th|./td")]
+            if len(cells) <= max(col_idx.values()):
+                continue
+            coin = cells[0].lstrip("☆★").strip()
+            hl = parse_percent(cells[col_idx["Hyperliquid"]])
+            arb = parse_percent(cells[col_idx["Binance-HL Arb"]])
+            if coin:
+                rows.append((coin, hl, arb))
+        if rows:
+            print(f"DEBUG: table 解析成功，{len(rows)} 行")
+            return rows
+    return []
 
 
 def _parse_row_major(driver):
@@ -167,7 +202,10 @@ def _parse_column_major(driver):
         """向上找 el 所属的堆栈容器：子元素>=10 且多数为百分数文本"""
         cur = el
         for _ in range(8):
-            cur = cur.find_element(By.XPATH, "..")
+            parents = cur.find_elements(By.XPATH, "parent::*")
+            if not parents:  # 已到文档根，安全停止
+                break
+            cur = parents[0]
             children = cur.find_elements(By.XPATH, "./*")
             if len(children) >= 10:
                 texts = [c.text.strip() for c in children]
