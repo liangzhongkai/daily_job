@@ -257,34 +257,7 @@ def fetch_funding_rows():
         driver.get(FUNDING_URL)
         wait = WebDriverWait(driver, 45)
 
-        # Hourly 是自定义下拉（styled-components div，非原生 select）：
-        # 先点击触发器展开，再点击弹出的选项（用模糊匹配，不要求全文精确等于）
-        try:
-            triggers = [e for e in driver.find_elements(
-                By.XPATH, "//*[contains(translate(text(),'HOURLY','hourly'),'hourly')]")
-                if e.is_displayed() and e.tag_name not in ("script", "style")]
-            if triggers:
-                trigger = triggers[0]
-                print(f"Hourly 触发器: <{trigger.tag_name}> class={trigger.get_attribute('class')!r} "
-                      f"text={trigger.text!r}")
-                driver.execute_script("arguments[0].click();", trigger)
-                time.sleep(1)
-                # 展开后会出现选项列表；点击除触发器以外的 Hourly 选项
-                for opt in driver.find_elements(
-                        By.XPATH, "//*[contains(translate(text(),'HOURLY','hourly'),'hourly')]"):
-                    if opt.is_displayed() and opt != trigger:
-                        driver.execute_script("arguments[0].click();", opt)
-                        print(f"已点击 Hourly 选项: <{opt.tag_name}> {opt.get_attribute('class')!r}")
-                        break
-                else:
-                    print("展开后未找到 Hourly 选项（可能默认已是 Hourly）")
-            else:
-                print("未找到 Hourly 触发器，按页面默认档位继续")
-            time.sleep(2)
-        except Exception as e:
-            print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
-
-        # 等表头出现（表头不一定是 <th>，直接按文本等）
+        # 等表头出现（说明页面已渲染完，再去找 Hourly 下拉）
         try:
             wait.until(EC.presence_of_element_located(
                 (By.XPATH, "//*[normalize-space(text())='Binance-HL Arb']")))
@@ -296,6 +269,38 @@ def fetch_funding_rows():
             print("DEBUG: 页面标题 =", driver.title)
             print("DEBUG: body 前2000字符 =\n", driver.page_source[:2000])
             raise RuntimeError("45秒内表头未渲染，快照已保存 funding_debug.html/png")
+
+        # Hourly 是自定义下拉（div，非原生 select），触发器带 ellipsis class：
+        # 等页面渲染完后再点击展开，然后点击弹出的选项
+        try:
+            candidates = [e for e in driver.find_elements(
+                By.CSS_SELECTOR, "[class*='ellipsis']")
+                if e.is_displayed() and e.text.strip()]
+            if not candidates:
+                candidates = [e for e in driver.find_elements(
+                    By.XPATH, "//*[contains(translate(text(),'HOURLY','hourly'),'hourly')]")
+                    if e.is_displayed() and e.tag_name not in ("script", "style")]
+            print(f"DEBUG: 下拉候选: {[(e.tag_name, e.get_attribute('class'), e.text.strip())
+                                     for e in candidates]}")
+            triggers = [e for e in candidates if 'hour' in e.text.strip().lower()]
+            if triggers:
+                trigger = triggers[0]
+                driver.execute_script("arguments[0].click();", trigger)
+                time.sleep(1)
+                # 展开后出现选项列表；点击除触发器以外的 Hourly 选项
+                for opt in driver.find_elements(
+                        By.XPATH, "//*[contains(translate(text(),'HOURLY','hourly'),'hourly')]"):
+                    if opt.is_displayed() and opt != trigger:
+                        driver.execute_script("arguments[0].click();", opt)
+                        print(f"已点击 Hourly 选项: <{opt.tag_name}> {opt.get_attribute('class')!r}")
+                        break
+                else:
+                    print("展开后未找到 Hourly 选项（可能默认已是 Hourly）")
+                time.sleep(2)  # 等表格按新档位刷新
+            else:
+                print("未找到 Hourly 触发器，按页面默认档位继续")
+        except Exception as e:
+            print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
 
         rows = parse_rows_generic(driver)
     finally:
