@@ -101,8 +101,18 @@ def parse_rows_generic(driver):
     同容器的兄弟行为数据行。不依赖 <table>/<th>/<td> 标签。"""
     rows = []
     header_cells = driver.find_elements(
-        By.XPATH, "//*[normalize-space(text())='Binance-HL Arb']")
+        By.XPATH, "//*[contains(text(),'Binance-HL Arb')]")
+    if not header_cells:
+        print("DEBUG: 页面中未找到含 'Binance-HL Arb' 的元素")
     for hc in header_cells:
+        print(f"DEBUG: 表头单元格 <{hc.tag_name}> class={hc.get_attribute('class')!r} "
+              f"text={hc.text!r}")
+        # 打印父级 3 层的 outerHTML，便于对照真实结构
+        anc = hc
+        for lvl in range(3):
+            anc = anc.find_element(By.XPATH, "..")
+            print(f"DEBUG: 祖先[{lvl+1}] <{anc.tag_name}> class={anc.get_attribute('class')!r} "
+                  f"outerHTML(前600)={anc.get_attribute('outerHTML')[:600]!r}")
         # 向上找一个"行"元素：其直接子元素数 >= 4（一行有多列）
         row_el = hc
         header_texts = []
@@ -145,17 +155,20 @@ def fetch_funding_rows():
         wait = WebDriverWait(driver, 45)
 
         # Hourly 是自定义下拉（styled-components div，非原生 select）：
-        # 先点击触发器展开，再点击弹出的选项
+        # 先点击触发器展开，再点击弹出的选项（用模糊匹配，不要求全文精确等于）
         try:
             triggers = [e for e in driver.find_elements(
-                By.XPATH, "//*[normalize-space(text())='Hourly']") if e.is_displayed()]
+                By.XPATH, "//*[contains(translate(text(),'HOURLY','hourly'),'hourly')]")
+                if e.is_displayed() and e.tag_name not in ("script", "style")]
             if triggers:
                 trigger = triggers[0]
+                print(f"Hourly 触发器: <{trigger.tag_name}> class={trigger.get_attribute('class')!r} "
+                      f"text={trigger.text!r}")
                 driver.execute_script("arguments[0].click();", trigger)
                 time.sleep(1)
                 # 展开后会出现选项列表；点击除触发器以外的 Hourly 选项
                 for opt in driver.find_elements(
-                        By.XPATH, "//*[normalize-space(text())='Hourly']"):
+                        By.XPATH, "//*[contains(translate(text(),'HOURLY','hourly'),'hourly')]"):
                     if opt.is_displayed() and opt != trigger:
                         driver.execute_script("arguments[0].click();", opt)
                         print(f"已点击 Hourly 选项: <{opt.tag_name}> {opt.get_attribute('class')!r}")
