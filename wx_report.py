@@ -3,6 +3,7 @@
 #       切换到 Hourly，解析表格中 Hyperliquid / Binance-HL Arb 两列，
 #       任一列绝对值 >= 0.02% 时通过微信模板消息推送。
 import os
+import re
 import time
 import json
 import traceback
@@ -97,9 +98,9 @@ def parse_percent(text):
 
 
 def parse_rows_generic(driver):
-    """容错解析：优先按 <table> 遍历所有 <tr>（不依赖 thead/tbody/th 结构），
+    """容错解析当前页：优先按 <table> 遍历所有 <tr>（不依赖 thead/tbody/th 结构），
     失败则尝试行式 div 结构，最后尝试列式 div 结构。"""
-    rows = _parse_table(driver)
+    rows = parse_table_page(driver)
     if not rows:
         rows = _parse_row_major(driver)
     if not rows:
@@ -107,8 +108,9 @@ def parse_rows_generic(driver):
     return rows
 
 
-def _parse_table(driver):
-    """标准 <table> 解析：第一个 <tr> 当表头（无论 th/td），其余 <tr> 当数据行。"""
+def parse_table_page(driver):
+    """标准 <table> 解析当前显示的一页：第一个 <tr> 当表头（无论 th/td），
+    其余 <tr> 当数据行。解析不到返回 []。"""
     tables = driver.find_elements(
         By.XPATH, "//table[.//*[contains(text(),'Binance-HL Arb')]]")
     for table in tables:
@@ -135,9 +137,72 @@ def _parse_table(driver):
             if coin:
                 rows.append((coin, hl, arb))
         if rows:
-            print(f"DEBUG: table 解析成功，{len(rows)} 行")
             return rows
     return []
+
+
+def read_page_no(driver):
+    """读取页码指示器 'cur / total' 中的 cur，找不到返回 None"""
+    for el in driver.find_elements(By.XPATH, "//*[contains(text(),'/')]"):
+        m = re.match(r'^(\d+)\s*/\s*\d+$', el.text.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def first_data_coin(driver):
+    """读取表格第一条数据行的币名（tr[td][2]，tr[td][1] 是表头）"""
+    els = driver.find_elements(By.XPATH, "//table//tr[td][2]/td[1]")
+    return els[0].text.strip() if els else None
+
+
+def goto_next_page(driver):
+    """点击"下一页"；通过页码指示器递增或首行币名变化确认翻页成功。
+    已是最后一页或找不到翻页控件时返回 False。"""
+    cur = read_page_no(driver)
+    before_coin = first_data_coin(driver)
+    # 优先用页码判断是否还有下一页
+    if cur is not None:
+        total = None
+        for el in driver.find_elements(By.XPATH, "//*[contains(text(),'/')]"):
+            m = re.match(r'^\d+\s*/\s*(\d+)$', el.text.strip())
+            if m:
+                total = int(m.group(1))
+                break
+        if total is not None and cur >= total:
+            print(f"DEBUG: 已到最后一页 {cur}/{total}")
+            return False
+
+    # 找"下一页"控件：优先 class/aria-label 含 next，否则取可见含 svg 的小控件中
+    # DOM 靠后的（分页器里 prev 在前、next 在后）
+    picks = []
+    for el in driver.find_elements(
+            By.XPATH, "//button | //li | //div[@role='button'] | //span[@role='button']"):
+        if not el.is_displayed():
+            continue
+        cls = (el.get_attribute("class") or "").lower()
+        aria = (el.get_attribute("aria-label") or "").lower()
+        if el.get_attribute("aria-disabled") == "true" or "disabled" in cls:
+            continue
+        if "next" in cls or "next" in aria:
+            picks.insert(0, el)  # 含 next 的排最前
+        elif el.find_elements(By.TAG_NAME, "svg") and el.size.get("width", 999) <= 60:
+            picks.append(el)
+    if not picks:
+        print("DEBUG: 未找到下一页控件，停止翻页")
+        return False
+    driver.execute_script("arguments[0].click();", picks[0])
+
+    # 确认翻页：首行币名变化 或 页码+1（最多等6秒）
+    for _ in range(12):
+        time.sleep(0.5)
+        now = first_data_coin(driver)
+        if before_coin and now and now != before_coin:
+            return True
+        now_cur = read_page_no(driver)
+        if cur is not None and now_cur is not None and now_cur > cur:
+            return True
+    return False
 
 
 def _parse_row_major(driver):
@@ -302,7 +367,26 @@ def fetch_funding_rows():
         except Exception as e:
             print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
 
-        rows = parse_rows_generic(driver)
+        # 分页解析全部数据（表格分页，每页约25条）
+        page_rows = parse_table_page(driver)
+        if not page_rows:
+            rows = parse_rows_generic(driver)  # 兜底：非 table 结构的解析方式
+        else:
+            rows = list(page_rows)
+            seen = {r[0] for r in rows}
+            page_no = 1
+            while page_no < 300:  # 安全上限，防死循环
+                if not goto_next_page(driver):
+                    break
+                page_rows = parse_table_page(driver)
+                new = [r for r in page_rows if r[0] not in seen]
+                if not page_rows or not new:
+                    print("DEBUG: 翻页后无新数据，停止")
+                    break
+                seen.update(r[0] for r in new)
+                rows.extend(new)
+                page_no += 1
+            print(f"DEBUG: 共解析 {page_no} 页 / {len(rows)} 个币种")
     finally:
         driver.quit()
     return rows
@@ -350,9 +434,11 @@ def funding_alert_job():
             print("没有币种达到阈值，不发送消息")
             return
 
-        lines = [f" funding alert (Hourly, |rate|>={THRESHOLD_PERCENT}%):"]
-        for coin, hl, arb in alerts:
+        lines = [f"funding alert (Hourly, |rate|>={THRESHOLD_PERCENT}%) 共{len(alerts)}个:"]
+        for coin, hl, arb in alerts[:30]:  # 微信消息长度有限，只显示前30个（已按绝对值降序）
             lines.append(f"{coin}: HL={fmt(hl)}, Binance-HL Arb={fmt(arb)}")
+        if len(alerts) > 30:
+            lines.append(f"...其余 {len(alerts) - 30} 个见运行日志")
         message = "\n".join(lines)
         print(message)
 
