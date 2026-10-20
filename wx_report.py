@@ -335,6 +335,16 @@ def funding_alert_job():
         if not rows:
             print("未解析到表格数据，可能页面结构变化或加载失败")
             return
+
+        # 打印两列各自绝对值最大的合约及数值（不看正负号）
+        for idx, name in ((1, "Hyperliquid"), (2, "Binance-HL Arb")):
+            valid = [(coin, v) for coin, *vals in rows if (v := vals[idx - 1]) is not None]
+            if valid:
+                coin, v = max(valid, key=lambda x: abs(x[1]))
+                print(f"|{name}| 最大: {coin} = {fmt(v)}")
+            else:
+                print(f"|{name}| 无有效数值")
+
         alerts = filter_alerts(rows)
         if not alerts:
             print("没有币种达到阈值，不发送消息")
