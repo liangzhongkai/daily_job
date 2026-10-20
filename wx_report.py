@@ -178,6 +178,81 @@ def click_column_header(driver, name):
     return False
 
 
+def read_page_no(driver):
+    """读取页码指示器 'cur / total' 中的 cur，找不到返回 None"""
+    for el in driver.find_elements(By.XPATH, "//*[contains(text(),'/')]"):
+        m = re.match(r'^(\d+)\s*/\s*\d+$', el.text.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def goto_next_page(driver):
+    """点击"下一页"；通过页码指示器递增或首行币名变化确认翻页成功"""
+    cur = read_page_no(driver)
+    before_coin = first_data_coin(driver)
+    if cur is not None:
+        total = None
+        for el in driver.find_elements(By.XPATH, "//*[contains(text(),'/')]"):
+            m = re.match(r'^\d+\s*/\s*(\d+)$', el.text.strip())
+            if m:
+                total = int(m.group(1))
+                break
+        if total is not None and cur >= total:
+            return False
+    picks = []
+    for el in driver.find_elements(
+            By.XPATH, "//button | //li | //div[@role='button'] | //span[@role='button']"):
+        if not el.is_displayed():
+            continue
+        cls = (el.get_attribute("class") or "").lower()
+        aria = (el.get_attribute("aria-label") or "").lower()
+        if el.get_attribute("aria-disabled") == "true" or "disabled" in cls:
+            continue
+        if "next" in cls or "next" in aria:
+            picks.insert(0, el)
+        elif el.find_elements(By.TAG_NAME, "svg") and el.size.get("width", 999) <= 60:
+            picks.append(el)
+    if not picks:
+        return False
+    driver.execute_script("arguments[0].click();", picks[0])
+    for _ in range(12):
+        time.sleep(0.5)
+        now = first_data_coin(driver)
+        if before_coin and now and now != before_coin:
+            return True
+        now_cur = read_page_no(driver)
+        if cur is not None and now_cur is not None and now_cur > cur:
+            return True
+    return False
+
+
+def goto_first_page(driver):
+    """尽力回到第1页：反复点击"上一页"控件"""
+    for _ in range(310):
+        cur = read_page_no(driver)
+        if cur is None or cur <= 1:
+            return True
+        el = None
+        for cand in driver.find_elements(
+                By.XPATH, "//button | //li | //div[@role='button'] | //span[@role='button']"):
+            if not cand.is_displayed():
+                continue
+            cls = (cand.get_attribute("class") or "").lower()
+            aria = (cand.get_attribute("aria-label") or "").lower()
+            if cand.get_attribute("aria-disabled") == "true" or "disabled" in cls:
+                continue
+            if "prev" in cls or "prev" in aria or "left" in cls:
+                el = cand
+                break
+        if el is None:
+            print(f"DEBUG: 未找到上一页控件，当前页 {cur}")
+            return False
+        driver.execute_script("arguments[0].click();", el)
+        time.sleep(0.5)
+    return False
+
+
 def _parse_row_major(driver):
     """通用行列解析：按文本定位表头单元格 → 其所在行为表头行 →
     同容器的兄弟行为数据行。不依赖 <table>/<th>/<td> 标签。"""
@@ -346,7 +421,9 @@ def fetch_funding_rows():
         snapshots = {}  # coin -> (hl, arb)，按币名去重
         any_change = False
         for col in TARGET_COLUMNS:
+            col_idx = 1 if col == "Hyperliquid" else 2
             for click_no in (1, 2):
+                goto_first_page(driver)  # 先尽力回到第1页再排序，避免上一列的翻页影响
                 changed = click_column_header(driver, col)
                 any_change = any_change or changed
                 time.sleep(0.5)
@@ -356,6 +433,19 @@ def fetch_funding_rows():
                       f"{len(page_rows)} 行, 首行: {top}")
                 for coin, hl, arb in page_rows:
                     snapshots[coin] = (hl, arb)
+                # 该列值为 None 的合约会排在最前：若整页该列都为 None，
+                # 继续翻页直到出现第一个有值的合约（即该方向的极值）
+                skipped = 0
+                while page_rows and all(r[col_idx] is None for r in page_rows):
+                    skipped += 1
+                    if skipped > 15 or not goto_next_page(driver):
+                        break
+                    page_rows = parse_table_page(driver)
+                    print(f"DEBUG: {col} 第{click_no}次排序该页全为 None，"
+                          f"已翻 {skipped} 屏，当前首行: "
+                          f"{page_rows[0] if page_rows else None}")
+                    for coin, hl, arb in page_rows:
+                        snapshots[coin] = (hl, arb)
         if not any_change:
             print("WARNING: 4次列头点击均未引起排序变化，以下结果可能只是默认页数据！")
         rows = [(c, hl, arb) for c, (hl, arb) in snapshots.items()]
@@ -410,11 +500,11 @@ def funding_alert_job():
             return
 
         lines = [f"funding alert (Hourly, |rate|>={THRESHOLD_PERCENT}%) 共{len(alerts)}个:"]
-        for coin, hl, arb in alerts[:30]:  # 微信消息长度有限，只显示前30个（已按绝对值降序）
+        for coin, hl, arb in alerts[:3]:  # 微信消息长度有限，只显示前3个（已按绝对值降序）
             lines.append(f"{coin}: HL={fmt(hl)}, Binance-HL Arb={fmt(arb)}")
-        if len(alerts) > 30:
-            lines.append(f"...其余 {len(alerts) - 30} 个见运行日志")
-        message = "\n".join(lines)
+        # if len(alerts) > 3:
+        #     lines.append(f"...其余 {len(alerts) - 3} 个见运行日志")
+        message = " ".join(lines)
         print(message)
 
         # 1.获取access_token 2.发送消息
