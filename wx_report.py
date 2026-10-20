@@ -148,13 +148,34 @@ def first_data_coin(driver):
 
 
 def click_column_header(driver, name):
-    """点击列头触发排序（再次点击切换升/降序）"""
-    tds = driver.find_elements(By.XPATH, f"//td[normalize-space()='{name}']")
-    if not tds:
+    """点击列头触发排序（再次点击切换升/降序）。onClick 绑定层级未知，
+    依次尝试 文本div → 父级 → td，每次点击后用"首行币名变化"确认生效。"""
+    before = first_data_coin(driver)
+    td = None
+    for t in driver.find_elements(By.XPATH, f"//td[normalize-space()='{name}']"):
+        if t.is_displayed():
+            td = t
+            break
+    if td is None:
         print(f"DEBUG: 未找到列头 {name}")
         return False
-    driver.execute_script("arguments[0].click();", tds[0])
-    return True
+    inner = td.find_elements(By.XPATH, f".//*[normalize-space(text())='{name}']")
+    targets = []
+    if inner:
+        targets.append(inner[0])                                     # 文本 div
+        targets.append(inner[0].find_element(By.XPATH, ".."))        # 其父级（flex 容器）
+    targets.append(td)                                               # td 本身
+    for i, t in enumerate(targets):
+        try:
+            driver.execute_script("arguments[0].click();", t)
+        except Exception:
+            continue
+        for _ in range(10):  # 最多等5秒确认排序生效
+            time.sleep(0.5)
+            if first_data_coin(driver) != before:
+                return True
+        print(f"DEBUG: {name} 第{i + 1}个点击目标未触发排序，换下一个")
+    return False
 
 
 def _parse_row_major(driver):
@@ -323,22 +344,20 @@ def fetch_funding_rows():
         # 绝对值达标的行必然连续位于该列排序结果的最前部（正值在最前或负值在最前），
         # 因此 4 个快照（2列 x 升/降序）即可覆盖全部达标行，无需遍历176页。
         snapshots = {}  # coin -> (hl, arb)，按币名去重
+        any_change = False
         for col in TARGET_COLUMNS:
             for click_no in (1, 2):
-                before = first_data_coin(driver)
-                if not click_column_header(driver, col):
-                    break
-                # 等表格按新排序刷新（首行变化，最多5秒）
-                for _ in range(10):
-                    time.sleep(0.5)
-                    if first_data_coin(driver) != before:
-                        break
+                changed = click_column_header(driver, col)
+                any_change = any_change or changed
                 time.sleep(0.5)
                 page_rows = parse_table_page(driver)
-                print(f"DEBUG: {col} 第{click_no}次排序后解析 {len(page_rows)} 行，"
-                      f"首行: {page_rows[0][0] if page_rows else 'N/A'}")
+                top = page_rows[0] if page_rows else None
+                print(f"DEBUG: {col} 第{click_no}次排序: changed={changed} "
+                      f"{len(page_rows)} 行, 首行: {top}")
                 for coin, hl, arb in page_rows:
                     snapshots[coin] = (hl, arb)
+        if not any_change:
+            print("WARNING: 4次列头点击均未引起排序变化，以下结果可能只是默认页数据！")
         rows = [(c, hl, arb) for c, (hl, arb) in snapshots.items()]
         if not rows:
             rows = parse_rows_generic(driver)  # 兜底：排序点击失败时至少解析默认页
