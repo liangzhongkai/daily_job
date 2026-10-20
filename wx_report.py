@@ -499,9 +499,10 @@ def funding_alert_job():
             print("没有币种达到阈值，不发送消息")
             return
 
-        lines = [f"funding alert (Hourly, |rate|>={THRESHOLD_PERCENT}%) 共{len(alerts)}个:"]
+        # lines = [f"funding alert (Hourly, |rate|>={THRESHOLD_PERCENT}%) 共{len(alerts)}个:"]
+        lines = [f"funding alert: "]
         for coin, hl, arb in alerts[:3]:  # 微信消息长度有限，只显示前3个（已按绝对值降序）
-            lines.append(f"{coin}: HL={fmt(hl)}, Binance-HL Arb={fmt(arb)}")
+            lines.append(f"{coin}: HL={fmt(hl)}, Bn-HL={fmt(arb)}")
         # if len(alerts) > 3:
         #     lines.append(f"...其余 {len(alerts) - 3} 个见运行日志")
         message = " ".join(lines)
