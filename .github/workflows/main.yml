@@ -5,8 +5,9 @@ name: wx推送
 
 on:
   schedule:
-    # 每10分钟触发一次（UTC 时间，北京时间需 +8）；推送本文件会重新注册 schedule
-    - cron: '*/10 * * * *'
+    # GitHub 对高频 cron 降级严重（实测一天仅数次），故只保留每小时一次的兜底；
+    # 每10分钟的精准触发由外部定时器（cron-job.org）调用 workflow_dispatch 实现
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 permissions:
