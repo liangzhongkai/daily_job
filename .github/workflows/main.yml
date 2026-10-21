@@ -6,7 +6,7 @@ name: wx推送
 on:
   schedule:
     # 每10分钟触发一次（UTC 时间，北京时间需 +8）；推送本文件会重新注册 schedule
-    - cron: '*/10 * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 permissions:
