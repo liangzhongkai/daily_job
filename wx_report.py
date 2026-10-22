@@ -362,6 +362,24 @@ def _parse_column_major(driver):
     return rows
 
 
+def merge_snapshot(snapshots, coin, hl, arb):
+    """按字段合并快照：None 不覆盖已有有效值，避免某次排序页里
+    单元格未渲染/解析失败把之前解析到的有效值污染成 None。
+    返回本次修复的字段数（0/1/2）。"""
+    fixed = 0
+    cur = snapshots.get(coin)
+    if cur is None:
+        snapshots[coin] = [hl, arb]
+        return 0
+    if cur[0] is None and hl is not None:
+        cur[0] = hl
+        fixed += 1
+    if cur[1] is None and arb is not None:
+        cur[1] = arb
+        fixed += 1
+    return fixed
+
+
 def fetch_funding_rows():
     """打开页面，点击 Hourly，返回 [(coin, hyperliquid, binance_hl_arb), ...]"""
     driver = build_driver()
@@ -418,7 +436,8 @@ def fetch_funding_rows():
         # 用点击列头排序代替翻页：每列点两次得到升序+降序，各取第一页。
         # 绝对值达标的行必然连续位于该列排序结果的最前部（正值在最前或负值在最前），
         # 因此 4 个快照（2列 x 升/降序）即可覆盖全部达标行，无需遍历176页。
-        snapshots = {}  # coin -> (hl, arb)，按币名去重
+        snapshots = {}  # coin -> [hl, arb]，按币名去重
+        fixed = 0
         any_change = False
         for col in TARGET_COLUMNS:
             col_idx = 1 if col == "Hyperliquid" else 2
@@ -432,7 +451,7 @@ def fetch_funding_rows():
                 print(f"DEBUG: {col} 第{click_no}次排序: changed={changed} "
                       f"{len(page_rows)} 行, 首行: {top}")
                 for coin, hl, arb in page_rows:
-                    snapshots[coin] = (hl, arb)
+                    fixed += merge_snapshot(snapshots, coin, hl, arb)
                 # 该列值为 None 的合约会排在最前：若整页该列都为 None，
                 # 继续翻页直到出现第一个有值的合约（即该方向的极值）
                 skipped = 0
@@ -445,9 +464,10 @@ def fetch_funding_rows():
                           f"已翻 {skipped} 屏，当前首行: "
                           f"{page_rows[0] if page_rows else None}")
                     for coin, hl, arb in page_rows:
-                        snapshots[coin] = (hl, arb)
+                        fixed += merge_snapshot(snapshots, coin, hl, arb)
         if not any_change:
             print("WARNING: 4次列头点击均未引起排序变化，以下结果可能只是默认页数据！")
+        print(f"DEBUG: 快照合并修复了 {fixed} 个 None 字段")
         rows = [(c, hl, arb) for c, (hl, arb) in snapshots.items()]
         if not rows:
             rows = parse_rows_generic(driver)  # 兜底：排序点击失败时至少解析默认页
