@@ -458,9 +458,11 @@ def fetch_funding_rows():
         except Exception as e:
             print(f"选择 Hourly 失败，按页面默认档位继续: {e}")
 
-        # 用点击列头排序代替翻页：每列点两次得到升序+降序，各取第一页。
-        # 绝对值达标的行必然连续位于该列排序结果的最前部（正值在最前或负值在最前），
-        # 因此 4 个快照（2列 x 升/降序）即可覆盖全部达标行，无需遍历176页。
+        # 用点击列头排序代替翻页：排序后达标行连续位于该列排序结果最前部
+        # （空值排最前，其余按值降序），因此从第1页起沿排序方向翻页、
+        # 直到整页该列绝对值都低于阈值即可覆盖全部达标行，无需遍历176页。
+        # 注意：实测第2次点击并不总是反向排序（Binance-HL Arb 列表现为
+        # 同一降序的延续），但翻页-至-低于阈值策略不依赖点击方向。
         snapshots = {}  # coin -> [hl, arb]，按币名去重
         fixed = 0
         any_change = False
@@ -491,17 +493,27 @@ def fetch_funding_rows():
                     if v is not None and abs(v) > col_max_abs:
                         col_max_abs = abs(v)
                     fixed += merge_snapshot(snapshots, coin, hl, arb)
-                # 该列值为 None 的合约会排在最前：若整页该列都为 None，
-                # 继续翻页直到出现第一个有值的合约（即该方向的极值）
-                skipped = 0
-                while page_rows and all(r[col_idx] is None for r in page_rows):
-                    skipped += 1
-                    if skipped > 15 or not goto_next_page(driver):
+                # 该列值为 None 的合约会排在最前：先翻过全 None 的页；
+                # 之后只要当前页仍有该列 |值| >= 阈值，就继续翻页，
+                # 直到整页低于阈值（达标行在排序结果中是连续的，到此即覆盖完）
+                pages = 0
+                while page_rows:
+                    all_null = all(r[col_idx] is None for r in page_rows)
+                    above = any(r[col_idx] is not None and
+                                abs(r[col_idx]) >= THRESHOLD_PERCENT
+                                for r in page_rows)
+                    if not (all_null or above):
+                        break
+                    pages += 1
+                    if pages > 30 or not goto_next_page(driver):
+                        if pages > 30:
+                            print(f"WARNING: {col} 第{click_no}次排序翻页超过30屏仍未"
+                                  f"低于阈值，提前停止（可能遗漏尾部达标行）")
                         break
                     page_rows = parse_table_page(driver)
-                    print(f"DEBUG: {col} 第{click_no}次排序该页全为 None，"
-                          f"已翻 {skipped} 屏，当前首行: "
-                          f"{page_rows[0] if page_rows else None}")
+                    print(f"DEBUG: {col} 第{click_no}次排序继续翻页 {pages} 屏"
+                          f"（{'全None' if all_null else '仍有达标值'}），"
+                          f"首行: {page_rows[0] if page_rows else None}")
                     for coin, hl, arb in page_rows:
                         v = hl if col_idx == 1 else arb
                         if v is not None and abs(v) > col_max_abs:

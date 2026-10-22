@@ -192,11 +192,9 @@ def push_wx_template(text):
         payload = {
             "touser": WX_OPEN_ID,
             "template_id": WX_TEMPLATE_ID,
+            "url": "https://app.hyperliquid.xyz/",
             "data": {
-                "first":    {"value": first_line},
-                "keyword1": {"value": "Hyperliquid 15m"},
-                "keyword2": {"value": ts()},
-                "remark":   {"value": text}
+                "ssr": {"value": text or first_line}
             }
         }
         resp = requests.post(
