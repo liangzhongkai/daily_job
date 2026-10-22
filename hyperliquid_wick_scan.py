@@ -79,35 +79,42 @@ def fetch_candles(coin):
 
 
 def check_bar(bars, symbol):
-    """判定最后一根K线：上影或下影(任一)长度 >= 实体|open-close|，且放量5倍"""
+    """判定最后一根K线，返回 (命中dict或None, 过程统计info)"""
     last, prevs = bars[-1], bars[:-1]
     o, h, l, c = last["o"], last["h"], last["l"], last["c"]
     body = abs(c - o)
     upper = h - max(o, c)
     lower = min(o, c) - l
+    info = {"shape_ok": False, "vol_x": 0.0, "quote_v": 0}
     if body == 0:
-        return None
-    if max(upper, lower) < body:  # 上影或下影其一须 >= 实体
-        return None
+        return None, info
     avg_vol = sum(b["quote_v"] for b in prevs) / len(prevs)
-    if avg_vol <= 0 or last["quote_v"] < avg_vol * 5:
-        return None
-    if last["quote_v"] < MIN_QUOTE_VOL:
-        return None
+    if avg_vol <= 0:
+        return None, info
+    info["vol_x"] = round(last["quote_v"] / avg_vol, 1)
+    info["quote_v"] = int(last["quote_v"])
+    if max(upper, lower) < body:  # 上影或下影其一须 >= 实体
+        return None, info
+    info["shape_ok"] = True
+    if info["vol_x"] < 5:
+        return None, info
+    if info["quote_v"] < MIN_QUOTE_VOL:
+        return None, info
     return {
         "symbol": symbol,
-        "pct_upper_body": round(upper / body, 1),
-        "pct_upper_lower": round(upper / max(lower, 1e-12), 1),
-        "vol_x": round(last["quote_v"] / avg_vol, 1),
-        "quote_v": int(last["quote_v"]),
+        "wick_body": round(max(upper, lower) / body, 1),
+        "side": "上影" if upper >= lower else "下影",
+        "vol_x": info["vol_x"],
+        "quote_v": info["quote_v"],
         "price": c,
-    }
+    }, info
 
 
 def scan():
     universe = fetch_universe()
     print(f"Hyperliquid 永续合约总数(未退市): {len(universe)}")
-    hits = []
+    hits, near_miss = [], []      # near_miss: 形态通过但放量不足/成交额不足
+    n_fetched = n_err = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futs = {ex.submit(fetch_candles, name): name
                 for name, _ in universe if name not in EXCLUDED}
@@ -116,13 +123,24 @@ def scan():
             try:
                 bars = fut.result()
             except Exception as e:
-                print(f"[warn] {name} 拉取失败: {e}")
+                n_err += 1
+                if n_err <= 5:
+                    print(f"[warn] {name} 拉取失败: {e}")
                 continue
             if not bars:
                 continue
-            r = check_bar(bars, name)
+            n_fetched += 1
+            r, info = check_bar(bars, name)
             if r:
                 hits.append(r)
+            elif info["shape_ok"]:
+                near_miss.append({"symbol": name, **info})
+    near_miss.sort(key=lambda x: -x["vol_x"])
+    print(f"统计: 成功拉取K线 {n_fetched} 个 | 形态通过(影线>=实体) "
+          f"{len(hits) + len(near_miss)} 个 | 最终命中 {len(hits)} 个 | 拉取失败 {n_err} 个")
+    for x in near_miss[:5]:
+        print(f"  惜败: {x['symbol']}  放量={x['vol_x']}x(需5x)  "
+              f"成交额≈{x['quote_v']:,}$(需{MIN_QUOTE_VOL:,}$)")
     hits.sort(key=lambda x: -x["quote_v"])
     return hits
 
@@ -173,8 +191,8 @@ def main():
     if not hits:
         print(f"[{ts()}] 无符合条件的合约")
         return
-    lines = [f"{h['symbol']}  上影/实体={h['pct_upper_body']}  "
-             f"上影/下影={h['pct_upper_lower']}  放量={h['vol_x']}x  "
+    lines = [f"{h['symbol']}  {h['side']}/实体={h['wick_body']}  "
+             f"放量={h['vol_x']}x  "
              f"成交额≈{h['quote_v']:,}$  价格={h['price']}" for h in hits]
     text = f"{ts()} Hyperliquid 15m 长上影放量 {len(hits)} 个:\n" + "\n".join(lines)
     print(text)
