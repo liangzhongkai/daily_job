@@ -37,7 +37,9 @@ def get_access_token():
     url = 'https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={}&secret={}' \
         .format(appID.strip(), appSecret.strip())
     response = requests.get(url).json()
-    print(response)
+    # 不打印完整响应，避免 access_token 泄漏到运行日志
+    print(f"get_access_token: errcode={response.get('errcode', 0)} "
+          f"{'errmsg=' + str(response.get('errmsg')) if response.get('errcode') else 'ok'}")
     access_token = response.get('access_token')
     return access_token
 
@@ -110,7 +112,23 @@ def parse_rows_generic(driver):
 
 def parse_table_page(driver):
     """标准 <table> 解析当前显示的一页：第一个 <tr> 当表头（无论 th/td），
-    其余 <tr> 当数据行。解析不到返回 []。"""
+    其余 <tr> 当数据行。解析不到返回 []。
+    排序点击后 React 会整表重渲染，读取期间元素可能变 stale，
+    重试直到某一次完整读取成功（stale 期间读到的是错位/旧数据，不可用）。"""
+    from selenium.common.exceptions import StaleElementReferenceException
+    for _ in range(10):
+        try:
+            rows = _parse_table_page_once(driver)
+        except StaleElementReferenceException:
+            time.sleep(0.5)
+            continue
+        if rows is not None:
+            return rows
+        time.sleep(0.5)
+    return []
+
+
+def _parse_table_page_once(driver):
     tables = driver.find_elements(
         By.XPATH, "//table[.//*[contains(text(),'Binance-HL Arb')]]")
     for table in tables:
@@ -142,9 +160,16 @@ def parse_table_page(driver):
 
 
 def first_data_coin(driver):
-    """读取表格第一条数据行的币名（tr[td][2]，tr[td][1] 是表头）"""
-    els = driver.find_elements(By.XPATH, "//table//tr[td][2]/td[1]")
-    return els[0].text.strip() if els else None
+    """读取表格第一条数据行的币名（tr[td][2]，tr[td][1] 是表头）。
+    排序重渲染期间元素可能 stale，重试几次拿到稳定值。"""
+    from selenium.common.exceptions import StaleElementReferenceException
+    for _ in range(10):
+        try:
+            els = driver.find_elements(By.XPATH, "//table//tr[td][2]/td[1]")
+            return els[0].text.strip() if els else None
+        except StaleElementReferenceException:
+            time.sleep(0.5)
+    return None
 
 
 def click_column_header(driver, name):
@@ -441,16 +466,30 @@ def fetch_funding_rows():
         any_change = False
         for col in TARGET_COLUMNS:
             col_idx = 1 if col == "Hyperliquid" else 2
+            col_max_abs = 0.0  # 该列在快照中见到的最大绝对值，用于校验排序是否生效
             for click_no in (1, 2):
                 goto_first_page(driver)  # 先尽力回到第1页再排序，避免上一列的翻页影响
                 changed = click_column_header(driver, col)
                 any_change = any_change or changed
-                time.sleep(0.5)
-                page_rows = parse_table_page(driver)
+                # 排序点击后等表格刷新稳定：连续两次读取结果一致才采样，
+                # 避免表格尚未重排时读到旧顺序（会导致漏采真正的极值行）
+                stable_rows, prev = None, None
+                for _ in range(20):  # 最多等10秒
+                    time.sleep(0.5)
+                    cur = parse_table_page(driver)
+                    if cur and cur == prev:
+                        stable_rows = cur
+                        break
+                    prev = cur
+                page_rows = stable_rows if stable_rows is not None else \
+                    parse_table_page(driver)
                 top = page_rows[0] if page_rows else None
                 print(f"DEBUG: {col} 第{click_no}次排序: changed={changed} "
                       f"{len(page_rows)} 行, 首行: {top}")
                 for coin, hl, arb in page_rows:
+                    v = hl if col_idx == 1 else arb
+                    if v is not None and abs(v) > col_max_abs:
+                        col_max_abs = abs(v)
                     fixed += merge_snapshot(snapshots, coin, hl, arb)
                 # 该列值为 None 的合约会排在最前：若整页该列都为 None，
                 # 继续翻页直到出现第一个有值的合约（即该方向的极值）
@@ -464,7 +503,23 @@ def fetch_funding_rows():
                           f"已翻 {skipped} 屏，当前首行: "
                           f"{page_rows[0] if page_rows else None}")
                     for coin, hl, arb in page_rows:
+                        v = hl if col_idx == 1 else arb
+                        if v is not None and abs(v) > col_max_abs:
+                            col_max_abs = abs(v)
                         fixed += merge_snapshot(snapshots, coin, hl, arb)
+            # 校验：排序首页首行应接近该列快照极值；差距大说明排序未按该列生效
+            top_valid = [(c, vals[col_idx - 1]) for c, *vals in
+                         [(c, s[0], s[1]) for c, s in snapshots.items()]
+                         if vals[col_idx - 1] is not None]
+            if top_valid:
+                snap_max = max(abs(v) for _, v in top_valid)
+                snap_max_coin = [c for c, v in top_valid if abs(v) == snap_max][0]
+                if snap_max > 0 and col_max_abs < snap_max * 0.9:
+                    print(f"WARNING: {col} 列排序可能未生效：排序页采到的最大绝对值 "
+                          f"{col_max_abs:.4f} 远小于快照中的 {snap_max_coin} {snap_max:.4f}，"
+                          f"可能漏采达标行！")
+                print(f"DEBUG: {col} 列快照最大绝对值: {snap_max_coin} = "
+                      f"{fmt(next(v for c, v in top_valid if c == snap_max_coin))}")
         if not any_change:
             print("WARNING: 4次列头点击均未引起排序变化，以下结果可能只是默认页数据！")
         print(f"DEBUG: 快照合并修复了 {fixed} 个 None 字段")

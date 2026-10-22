@@ -10,6 +10,7 @@
 import os
 import time
 import json
+import requests
 import urllib.request
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
