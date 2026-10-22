@@ -1,0 +1,35 @@
+name: binance量能影线监控
+
+on:
+  schedule:
+    # 每小时的 00/15/30/45 分触发；GitHub 高频 cron 降级严重，此为兜底，
+    # 精准触发由 cron-job.org 调用 workflow_dispatch（同 wx推送 的配置方式）
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.12"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+    - name: Scan binance 15m klines
+      run: |
+        python binance_wick_scan.py
+      env:
+        APP_ID: ${{ secrets.APP_ID }}
+        APP_SECRET: ${{ secrets.APP_SECRET }}
+        OPEN_ID: ${{ secrets.OPEN_ID }}
+        TEMPLATE_ID: ${{ secrets.TEMPLATE_ID }}
