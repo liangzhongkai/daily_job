@@ -17,8 +17,15 @@ appSecret = os.environ.get("APP_SECRET")
 openId = os.environ.get("OPEN_ID")
 template_id = os.environ.get("TEMPLATE_ID")
 
-# Binance U本位合约 API；如运行环境被地区封锁，可设置 BINANCE_FAPI_HOST 指向可用代理
-FAPI_HOST = os.environ.get("BINANCE_FAPI_HOST", "https://fapi.binance.com")
+# Binance U本位合约 API；如运行环境被地区封锁(451)，可设置 BINANCE_FAPI_HOST(S)
+# 指向可用代理。BINANCE_FAPI_HOSTS 支持逗号分隔多个候选，逐个探测取第一个可用的
+_default_hosts = "https://fapi.binance.com"
+if os.environ.get("BINANCE_FAPI_HOST"):
+    _default_hosts = os.environ["BINANCE_FAPI_HOST"]
+FAPI_HOST_CANDIDATES = [h.strip().rstrip("/") for h in
+                        os.environ.get("BINANCE_FAPI_HOSTS", _default_hosts).split(",")
+                        if h.strip()]
+FAPI_HOST = FAPI_HOST_CANDIDATES[0]   # 实际在 scan() 里探测后再确定
 INTERVAL = "15m"
 VOL_MULT = 5.0          # 放量倍数阈值
 WICK_MIN, WICK_MAX = 0.8, 1.2   # 影线/实体比值的“几乎一样长”区间
@@ -57,17 +64,30 @@ def send_data(access_token, message):
 
 
 def get_perp_symbols(session):
-    """全部 TRADING 状态的 USDT 本位永续合约"""
-    r = session.get(f"{FAPI_HOST}/fapi/v1/exchangeInfo", timeout=20)
-    if r.status_code in (451, 403):
-        raise RuntimeError(
-            f"Binance API 对当前网络不可用(HTTP {r.status_code})，"
-            f"请设置环境变量 BINANCE_FAPI_HOST 指向可用的代理地址")
-    r.raise_for_status()
-    return [s["symbol"] for s in r.json().get("symbols", [])
-            if s.get("contractType") == "PERPETUAL"
-            and s.get("quoteAsset") == "USDT"
-            and s.get("status") == "TRADING"]
+    """全部 TRADING 状态的 USDT 本位永续合约；逐个候选 host 探测，
+    第一个能正常返回的 host 接管后续所有请求（写回全局 FAPI_HOST）"""
+    global FAPI_HOST
+    last_code = None
+    for host in FAPI_HOST_CANDIDATES:
+        try:
+            r = session.get(f"{host}/fapi/v1/exchangeInfo", timeout=20)
+        except requests.RequestException as e:
+            print(f"host 不可达: {host} -> {e}")
+            continue
+        if r.status_code in (451, 403):
+            print(f"host 被地区封锁: {host} -> HTTP {r.status_code}")
+            last_code = r.status_code
+            continue
+        r.raise_for_status()
+        FAPI_HOST = host
+        print(f"使用 host: {host}")
+        return [s["symbol"] for s in r.json().get("symbols", [])
+                if s.get("contractType") == "PERPETUAL"
+                and s.get("quoteAsset") == "USDT"
+                and s.get("status") == "TRADING"]
+    raise RuntimeError(
+        f"所有候选 host 均不可用(最后状态码 {last_code})。"
+        f"请设置环境变量 BINANCE_FAPI_HOSTS 指向可用的代理地址")
 
 
 def check_symbol(sym, session):
@@ -149,8 +169,16 @@ def scan():
 
 
 if __name__ == '__main__':
-    try:
-        scan()
-    except Exception:
-        traceback.print_exc()
-        raise
+    import sys
+    import time
+    attempts = int(os.environ.get("SCAN_ATTEMPTS", "3"))
+    for i in range(1, attempts + 1):
+        try:
+            scan()
+            break
+        except Exception:
+            traceback.print_exc()
+            if i == attempts:
+                sys.exit(1)
+            print(f"第 {i} 次失败，60 秒后重试 ...")
+            time.sleep(60)
