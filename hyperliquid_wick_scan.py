@@ -158,22 +158,6 @@ def ts():
     return datetime.now(timezone.utc).astimezone().strftime("%m-%d %H:%M")
 
 
-def push_wechat(text):
-    """Server酱推送到微信"""
-    if not SENDKEY:
-        print("[push] 未配置 SENDKEY，跳过 Server酱推送")
-        return
-    try:
-        data = urllib.parse.urlencode({
-            "title": "Hyperliquid 长上影放量",
-            "desp": text}).encode()
-        urllib.request.urlopen(
-            PUSH_URL.format(sendkey=SENDKEY), data=data, timeout=15).read()
-        print("[push] Server酱推送完成")
-    except Exception as e:
-        print(f"[push] Server酱推送失败: {e}")
-
-
 def push_wx_template(text):
     """微信测试号模板消息推送（与 wx_report.py 同一套 appID/模板）"""
     if not (WX_APP_ID and WX_APP_SECRET and WX_OPEN_ID and WX_TEMPLATE_ID):
@@ -208,20 +192,6 @@ def push_wx_template(text):
         print(f"[push] 微信模板消息推送异常: {e}")
 
 
-def push_wecom(text):
-    """企业微信机器人推送（可选）"""
-    if not WECOM_WEBHOOK:
-        return
-    try:
-        data = json.dumps({"msgtype": "text",
-                           "text": {"content": text[:2000]}}).encode()
-        req = urllib.request.Request(
-            WECOM_WEBHOOK, data=data,
-            headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=15).read()
-        print("[push] 企业微信推送完成")
-    except Exception as e:
-        print(f"[push] 企业微信推送失败: {e}")
 
 
 def main():
@@ -237,13 +207,11 @@ def main():
     lines = [f"{h['symbol']}  {h['side']}/实体={h['wick_body']}  "
              f"放量={h['vol_x']}x  "
              f"成交额≈{h['quote_v']:,}$  价格={h['price']}" for h in hits]
-    text = f"{ts()} Hyperliquid 15m 长上影放量 {len(hits)} 个:\n" + "\n".join(lines)
+    text = f"HL 15m 长上影放量 {len(hits)} 个: " + " ".join(lines)
     print(text)
-    push_wechat(text)
     push_wx_template(text)
-    push_wecom(text)
 
 
 if __name__ == "__main__":
-    import urllib.parse   # noqa: E402  仅供 push_wechat 使用
+    import urllib.parse
     main()
