@@ -7,6 +7,7 @@
 注意：Hyperliquid K 线只有币本位成交量 v，美元成交额用 v*当根均价估算。
 由外部 cron（cron-job.org 每15分钟）触发，GitHub Actions 仅做兜底限频。
 """
+import os
 import time
 import json
 import urllib.request
@@ -15,8 +16,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ===== 微信推送配置（GitHub Secrets / 本机环境变量）=====
 PUSH_URL = "https://sctapi.ftqq.com/{sendkey}.send"
-SENDKEY = ""          # Server酱 sendkey
-WECOM_WEBHOOK = ""    # 企业微信机器人 webhook（可选，二选一）
+SENDKEY = os.environ.get("SENDKEY", "")   # Server酱 sendkey
+WECOM_WEBHOOK = os.environ.get("WECOM_WEBHOOK", "")  # 企业微信机器人 webhook（可选）
+# 微信测试号模板消息（与 wx_report.py 同一套配置）
+WX_APP_ID = os.environ.get("APP_ID")
+WX_APP_SECRET = os.environ.get("APP_SECRET")
+WX_OPEN_ID = os.environ.get("OPEN_ID")
+WX_TEMPLATE_ID = os.environ.get("TEMPLATE_ID")
 
 API = "https://api.hyperliquid.xyz/info"
 INTERVAL = "15m"
@@ -167,6 +173,42 @@ def push_wechat(text):
         print(f"[push] Server酱推送失败: {e}")
 
 
+def push_wx_template(text):
+    """微信测试号模板消息推送（与 wx_report.py 同一套 appID/模板）"""
+    if not (WX_APP_ID and WX_APP_SECRET and WX_OPEN_ID and WX_TEMPLATE_ID):
+        print("[push] 未配置微信测试号环境变量，跳过模板消息推送")
+        return
+    try:
+        token = requests.get(
+            "https://api.weixin.qq.com/cgi-bin/token",
+            params={"grant_type": "client_credential",
+                    "appid": WX_APP_ID, "secret": WX_APP_SECRET},
+            timeout=15).json().get("access_token")
+        if not token:
+            print("[push] 获取微信 access_token 失败")
+            return
+        first_line = text.splitlines()[0] if text else "Hyperliquid 长上影放量"
+        payload = {
+            "touser": WX_OPEN_ID,
+            "template_id": WX_TEMPLATE_ID,
+            "data": {
+                "first":    {"value": first_line},
+                "keyword1": {"value": "Hyperliquid 15m"},
+                "keyword2": {"value": ts()},
+                "remark":   {"value": text}
+            }
+        }
+        resp = requests.post(
+            f"https://api.weixin.qq.com/cgi-bin/message/template/send"
+            f"?access_token={token}", json=payload, timeout=15).json()
+        if resp.get("errcode") == 0:
+            print("[push] 微信模板消息推送完成")
+        else:
+            print(f"[push] 微信模板消息推送失败: {resp}")
+    except Exception as e:
+        print(f"[push] 微信模板消息推送异常: {e}")
+
+
 def push_wecom(text):
     """企业微信机器人推送（可选）"""
     if not WECOM_WEBHOOK:
@@ -199,6 +241,7 @@ def main():
     text = f"{ts()} Hyperliquid 15m 长上影放量 {len(hits)} 个:\n" + "\n".join(lines)
     print(text)
     push_wechat(text)
+    push_wx_template(text)
     push_wecom(text)
 
 
