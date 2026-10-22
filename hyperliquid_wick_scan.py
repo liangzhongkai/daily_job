@@ -74,7 +74,8 @@ def fetch_candles(coin):
         v = float(b.get("v", 0) or 0)          # 币本位成交量
         avg_px = (o + h + l + c) / 4
         out.append({"o": o, "h": h, "l": l, "c": c,
-                    "quote_v": v * avg_px})     # 估算美元成交额
+                    "v": v,                     # 币本位成交量（放量判定用）
+                    "quote_v": v * avg_px})     # 估算美元成交额（流动性过滤用）
     return out
 
 
@@ -85,13 +86,14 @@ def check_bar(bars, symbol):
     body = abs(c - o)
     upper = h - max(o, c)
     lower = min(o, c) - l
-    info = {"shape_ok": False, "vol_x": 0.0, "quote_v": 0}
+    info = {"shape_ok": False, "vol_x": 0.0, "quote_v": 0, "wick_body": 0.0}
     if body == 0:
         return None, info
-    avg_vol = sum(b["quote_v"] for b in prevs) / len(prevs)
+    info["wick_body"] = round(max(upper, lower) / body, 1)
+    avg_vol = sum(b["v"] for b in prevs) / len(prevs)   # 放量用成交量v，不受价格波动影响
     if avg_vol <= 0:
         return None, info
-    info["vol_x"] = round(last["quote_v"] / avg_vol, 1)
+    info["vol_x"] = round(last["v"] / avg_vol, 1)
     info["quote_v"] = int(last["quote_v"])
     if max(upper, lower) < body:  # 上影或下影其一须 >= 实体
         return None, info
@@ -140,7 +142,7 @@ def scan():
           f"{len(hits) + len(near_miss)} 个 | 最终命中 {len(hits)} 个 | 拉取失败 {n_err} 个")
     for x in near_miss[:5]:
         print(f"  惜败: {x['symbol']}  放量={x['vol_x']}x(需5x)  "
-              f"成交额≈{x['quote_v']:,}$(需{MIN_QUOTE_VOL:,}$)")
+              f"成交额≈{x['quote_v']:,}$(需{MIN_QUOTE_VOL:,}$)  影线/实体={x['wick_body']}")
     hits.sort(key=lambda x: -x["quote_v"])
     return hits
 
