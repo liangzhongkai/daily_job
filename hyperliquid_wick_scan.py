@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-扫描 Hyperliquid 永续合约：15m K 线上影线 > 实体*2 且 上影线 > 下影线*3，
+扫描 Hyperliquid 永续合约：15m K 线上影或下影(任一)长度 >= 实体|open-close|，
 且当根成交额 > 前12根均值*3（放量）。
 数据源：Hyperliquid info API（metaAndAssetCtxs / candleSnapshot）。
 注意：Hyperliquid K 线只有币本位成交量 v，美元成交额用 v*当根均价估算。
@@ -79,7 +79,7 @@ def fetch_candles(coin):
 
 
 def check_bar(bars, symbol):
-    """判定最后一根K线是否满足：上影>实体*2、上影>下影*3、放量3倍"""
+    """判定最后一根K线：上影或下影(任一)长度 >= 实体|open-close|，且放量3倍"""
     last, prevs = bars[-1], bars[:-1]
     o, h, l, c = last["o"], last["h"], last["l"], last["c"]
     body = abs(c - o)
@@ -87,7 +87,7 @@ def check_bar(bars, symbol):
     lower = min(o, c) - l
     if body == 0:
         return None
-    if upper <= body * 2 or upper <= lower * 3:
+    if max(upper, lower) < body:  # 上影或下影其一须 >= 实体
         return None
     avg_vol = sum(b["quote_v"] for b in prevs) / len(prevs)
     if avg_vol <= 0 or last["quote_v"] < avg_vol * 3:
