@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-扫描 Hyperliquid 永续合约：15m K 线上影或下影(任一)长度 >= 实体|open-close|，
-且当根成交额 > 前12根均值*5（放量）。
+扫描 Hyperliquid 永续合约，三种15m信号：
+1. 长影线：上影或下影(任一)长度 >= 实体|open-close|，且当根成交额 > 前12根均值*5（放量）；
+2. 突涨/突跌：|open-close| >= 前12根平均实体的10倍（不看影线，不要求放量）；
+3. 以上信号均要求当根估算美元成交额 >= MIN_QUOTE_VOL。
 数据源：Hyperliquid info API（metaAndAssetCtxs / candleSnapshot）。
 注意：Hyperliquid K 线只有币本位成交量 v，美元成交额用 v*当根均价估算。
 由外部 cron（cron-job.org 每15分钟）触发，GitHub Actions 仅做兜底限频。
@@ -77,17 +79,24 @@ def fetch_candles(coin):
     bars = raw[-N_BARS:]
     out = []
     for b in bars:
-        o, h, l, c = float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])
-        v = float(b.get("v", 0) or 0)          # 币本位成交量
+        try:
+            o, h, l, c = float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])
+        except (TypeError, ValueError, KeyError):
+            continue   # HL 偶尔返回字段为 null 的K线，直接丢弃
+        if not all(map(lambda x: x > 0 and x == x, (o, h, l, c))):
+            continue   # 过滤 0/负值/NaN
+        v = float(b.get("v") or 0)          # 币本位成交量
         avg_px = (o + h + l + c) / 4
         out.append({"o": o, "h": h, "l": l, "c": c,
                     "v": v,                     # 币本位成交量（放量判定用）
                     "quote_v": v * avg_px})     # 估算美元成交额（流动性过滤用）
+    if len(out) < N_BARS:   # 有坏K线被过滤，数据不完整则整体放弃
+        return None
     return out
 
 
 def check_bar(bars, symbol):
-    """判定最后一根K线，返回 (命中dict或None, 过程统计info)"""
+    """判定最后一根K线，返回 (命中list, 过程统计info)。命中可能是长影线或突涨/突跌"""
     last, prevs = bars[-1], bars[:-1]
     o, h, l, c = last["o"], last["h"], last["l"], last["c"]
     body = abs(c - o)
@@ -95,28 +104,32 @@ def check_bar(bars, symbol):
     lower = min(o, c) - l
     info = {"shape_ok": False, "vol_x": 0.0, "quote_v": 0, "wick_body": 0.0}
     if body == 0:
-        return None, info
+        return [], info
     info["wick_body"] = round(max(upper, lower) / body, 1)
     avg_vol = sum(b["v"] for b in prevs) / len(prevs)   # 放量用成交量v，不受价格波动影响
     if avg_vol <= 0:
-        return None, info
+        return [], info
     info["vol_x"] = round(last["v"] / avg_vol, 1)
     info["quote_v"] = int(last["quote_v"])
-    if max(upper, lower) < body:  # 上影或下影其一须 >= 实体
-        return None, info
-    info["shape_ok"] = True
-    if info["vol_x"] < 5:
-        return None, info
-    if info["quote_v"] < MIN_QUOTE_VOL:
-        return None, info
-    return {
-        "symbol": symbol,
-        "wick_body": round(max(upper, lower) / body, 1),
-        "side": "上影" if upper >= lower else "下影",
-        "vol_x": info["vol_x"],
-        "quote_v": info["quote_v"],
-        "price": c,
-    }, info
+    base = {"symbol": symbol, "vol_x": info["vol_x"],
+            "quote_v": info["quote_v"], "price": c}
+    hits = []
+    # 信号1：上影或下影其一 >= 实体，且放量5x
+    if max(upper, lower) >= body:
+        info["shape_ok"] = True
+        if info["vol_x"] >= 5 and info["quote_v"] >= MIN_QUOTE_VOL:
+            hits.append({**base, "kind": "wick",
+                         "side": "上影" if upper >= lower else "下影",
+                         "wick_body": round(max(upper, lower) / body, 1)})
+    # 信号2：实体(|open-close|)是前12根平均实体的10倍以上（突涨/突跌，不看影线）
+    avg_body = sum(abs(b["c"] - b["o"]) for b in prevs) / len(prevs)
+    if avg_body > 0 and body >= 10 * avg_body:
+        info["body_spike"] = True
+        if info["quote_v"] >= MIN_QUOTE_VOL:
+            hits.append({**base, "kind": "spike",
+                         "side": "突涨" if c > o else "突跌",
+                         "body_x": round(body / avg_body, 1)})
+    return hits, info
 
 
 def scan():
@@ -141,12 +154,12 @@ def scan():
             n_fetched += 1
             r, info = check_bar(bars, name)
             if r:
-                hits.append(r)
+                hits.extend(r)
             elif info["shape_ok"]:
                 near_miss.append({"symbol": name, **info})
     near_miss.sort(key=lambda x: -x["vol_x"])
-    print(f"统计: 成功拉取K线 {n_fetched} 个 | 形态通过(影线>=实体) "
-          f"{len(hits) + len(near_miss)} 个 | 最终命中 {len(hits)} 个 | 拉取失败 {n_err} 个")
+    print(f"统计: 成功拉取K线 {n_fetched} 个 | 影线形态通过 {len(hits) + len(near_miss)} 个 "
+          f"| 最终命中 {len(hits)} 个 (含突涨/突跌) | 拉取失败 {n_err} 个")
     for x in near_miss[:5]:
         print(f"  惜败: {x['symbol']}  放量={x['vol_x']}x(需5x)  "
               f"成交额≈{x['quote_v']:,}$(需{MIN_QUOTE_VOL:,}$)  影线/实体={x['wick_body']}")
@@ -204,10 +217,17 @@ def main():
     if not hits:
         print(f"[{ts()}] 无符合条件的合约")
         return
-    lines = [f"{h['symbol']}  {h['side']}/实体={h['wick_body']}  "
-             f"放量={h['vol_x']}x  "
-             f"成交额≈{h['quote_v']:,}$  价格={h['price']}" for h in hits]
-    text = f"HL 15m 长上影放量 {len(hits)} 个: " + " ".join(lines)
+    lines = []
+    for h in hits:
+        if h["kind"] == "spike":
+            lines.append(f"{h['symbol']}  {h['side']} 实体={h['body_x']}x均值  "
+                         f"放量={h['vol_x']}x  "
+                         f"成交额≈{h['quote_v']:,}$  价格={h['price']}")
+        else:
+            lines.append(f"{h['symbol']}  {h['side']}/实体={h['wick_body']}  "
+                         f"放量={h['vol_x']}x  "
+                         f"成交额≈{h['quote_v']:,}$  价格={h['price']}")
+    text = f"HL 15m 信号 {len(hits)} 个: " + " ".join(lines)
     print(text)
     push_wx_template(text)
 
